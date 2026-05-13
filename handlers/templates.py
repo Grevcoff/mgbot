@@ -6,7 +6,7 @@ from aiogram.types import Message, CallbackQuery
 
 from database import Database
 from states.templates import TemplateForm
-from keyboards.templates import templates_menu, template_actions, template_delete_confirm
+from keyboards.templates import get_varieties_list, get_template_actions, get_template_delete_confirm, get_edit_parameter_menu
 from keyboards.main import back_keyboard
 from utils.helpers import validate_number, format_hours
 from config import MAX_SEEDS_PER_LOT, MIN_SEEDS_PER_LOT, MAX_PRICE, MIN_PRICE, MAX_HOURS
@@ -56,18 +56,25 @@ async def templates_list_handler(callback: CallbackQuery):
             parse_mode="Markdown"
         )
     else:
-        await callback.message.edit_text(
-            "📦 *Шаблоны культур*\n\n"
-            "Выберите шаблон для управления:",
-            reply_markup=templates_menu(varieties),
-            parse_mode="Markdown"
-        )
+        try:
+            await callback.message.edit_text(
+                "📦 *Шаблоны культур*\n\n"
+                "Выберите шаблон для управления:",
+                reply_markup=get_varieties_list(varieties),
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e):
+                raise
     
     await callback.answer()
 
-@router.callback_query(F.data.startswith("template_edit_"))
+@router.callback_query(F.data.startswith("template_edit_") & ~F.data.startswith("template_edit_data_"))
 async def template_view_handler(callback: CallbackQuery):
     """Просмотр деталей шаблона"""
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"template_view_handler called with data: {callback.data}")
     variety_id = int(callback.data.split("_")[-1])
     variety = await db.get_variety(variety_id)
     
@@ -93,12 +100,19 @@ async def template_view_handler(callback: CallbackQuery):
         f"💰 *Себестоимость лотка:* {lot_cost:.2f}₽"
     )
     
-    await callback.message.edit_text(
-        text,
-        reply_markup=template_actions(variety_id),
-        parse_mode="Markdown"
-    )
-    await callback.answer()
+    try:
+        # Показываем детали с кнопками действий
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_template_actions(variety_id),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        # Если сообщение не изменилось, просто отвечаем на callback
+        if "message is not modified" in str(e):
+            await callback.answer()
+        else:
+            raise
 
 @router.callback_query(F.data == "template_add")
 async def template_add_start(callback: CallbackQuery, state: FSMContext):
@@ -106,17 +120,33 @@ async def template_add_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(TemplateForm.name)
     await state.update_data(editing_id=None, temp_data={})
     
-    await callback.message.edit_text(
-        "🌱 *Создание нового шаблона*\n\n"
-        "Шаг 1/8: Введите название культуры:",
-        reply_markup=back_keyboard(),
-        parse_mode="Markdown"
-    )
+    try:
+        await callback.message.edit_text(
+            "🌱 *Создание нового шаблона*\n\n"
+            "Шаг 1/8: Введите название культуры:",
+            reply_markup=back_keyboard(),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        # Если сообщение не изменилось, отправляем новое
+        if "message is not modified" in str(e):
+            await callback.message.answer(
+                "🌱 *Создание нового шаблона*\n\n"
+                "Шаг 1/8: Введите название культуры:",
+                reply_markup=back_keyboard(),
+                parse_mode="Markdown"
+            )
+        else:
+            raise
     await callback.answer()
 
 @router.callback_query(F.data.startswith("template_edit_data_"))
 async def template_edit_start(callback: CallbackQuery, state: FSMContext):
-    """Начало редактирования шаблона"""
+    """Начало редактирования шаблона - показать меню выбора параметра"""
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"template_edit_start called with data: {callback.data}")
+    
     variety_id = int(callback.data.split("_")[-1])
     variety = await db.get_variety(variety_id)
     
@@ -124,26 +154,13 @@ async def template_edit_start(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Шаблон не найден", show_alert=True)
         return
     
-    await state.set_state(TemplateForm.name)
-    await state.update_data(
-        editing_id=variety_id,
-        temp_data={
-            'name': variety['name'],
-            'seeds_per_lot': variety['seeds_per_lot'],
-            'seed_cost': variety['seed_cost_per_gram'],
-            'base_cost': variety['base_cost'],
-            'default_price': variety['default_sale_price'],
-            'soak_hours': variety['soak_hours'],
-            'dark_hours': variety['dark_hours'],
-            'light_hours': variety['light_hours']
-        }
-    )
+    # Сохраняем ID шаблона для последующего редактирования
+    await state.update_data(editing_id=variety_id)
     
     await callback.message.edit_text(
-        f"✏️ *Редактирование шаблона*\n\n"
-        f"Текущее название: {variety['name']}\n\n"
-        f"Введите новое название или отправьте текущее без изменений:",
-        reply_markup=back_keyboard(),
+        f"✏️ *Редактирование шаблона: {variety['name']}*\n\n"
+        f"Выберите параметр для редактирования:",
+        reply_markup=get_edit_parameter_menu(variety_id),
         parse_mode="Markdown"
     )
     await callback.answer()
@@ -151,6 +168,10 @@ async def template_edit_start(callback: CallbackQuery, state: FSMContext):
 @router.message(TemplateForm.name)
 async def template_name_handler(message: Message, state: FSMContext):
     """Обработка названия культуры"""
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"template_name_handler called with text: {message.text}")
+    
     name = message.text.strip()
     
     if len(name) < 2:
@@ -163,8 +184,31 @@ async def template_name_handler(message: Message, state: FSMContext):
     data = await state.get_data()
     temp_data = data.get('temp_data', {})
     temp_data['name'] = name
-    await state.update_data(temp_data=temp_data)
     
+    editing_id = data.get('editing_id')
+    
+    # Если это редактирование отдельного параметра - сразу сохраняем
+    if editing_id and len(temp_data) <= 2:  # Только name и возможно другие параметры
+        try:
+            await retry_on_network_error()(db.update_variety)(
+                editing_id,
+                name=temp_data['name']
+            )
+            
+            await message.answer(
+                f"✅ *Параметр обновлён!*\n\n"
+                f"Название: {temp_data['name']}",
+                reply_markup=get_varieties_list(await db.get_all_varieties()),
+                parse_mode="Markdown"
+            )
+            await state.clear()
+            return
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при сохранении: {str(e)}")
+            return
+    
+    # Иначе - полное создание/редактирование шаблона
+    await state.update_data(temp_data=temp_data)
     await state.set_state(TemplateForm.seeds_per_lot)
     
     current_value = temp_data.get('seeds_per_lot', 0)
@@ -191,8 +235,31 @@ async def template_seeds_handler(message: Message, state: FSMContext):
     data = await state.get_data()
     temp_data = data.get('temp_data', {})
     temp_data['seeds_per_lot'] = value
-    await state.update_data(temp_data=temp_data)
     
+    editing_id = data.get('editing_id')
+    
+    # Если это редактирование отдельного параметра - сразу сохраняем
+    if editing_id and len(temp_data) <= 2:  # Только seeds_per_lot и возможно другие параметры
+        try:
+            await retry_on_network_error()(db.update_variety)(
+                editing_id,
+                seeds_per_lot=temp_data['seeds_per_lot']
+            )
+            
+            await message.answer(
+                f"✅ *Параметр обновлён!*\n\n"
+                f"Семян на лоток: {temp_data['seeds_per_lot']}г",
+                reply_markup=get_varieties_list(await db.get_all_varieties()),
+                parse_mode="Markdown"
+            )
+            await state.clear()
+            return
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при сохранении: {str(e)}")
+            return
+    
+    # Иначе - полное создание/редактирование шаблона
+    await state.update_data(temp_data=temp_data)
     await state.set_state(TemplateForm.seed_cost)
     
     current_value = temp_data.get('seed_cost', 0)
@@ -219,8 +286,31 @@ async def template_seed_cost_handler(message: Message, state: FSMContext):
     data = await state.get_data()
     temp_data = data.get('temp_data', {})
     temp_data['seed_cost'] = value
-    await state.update_data(temp_data=temp_data)
     
+    editing_id = data.get('editing_id')
+    
+    # Если это редактирование отдельного параметра - сразу сохраняем
+    if editing_id and len(temp_data) <= 2:  # Только seed_cost и возможно другие параметры
+        try:
+            await retry_on_network_error()(db.update_variety)(
+                editing_id,
+                seed_cost_per_gram=temp_data['seed_cost']
+            )
+            
+            await message.answer(
+                f"✅ *Параметр обновлён!*\n\n"
+                f"Цена семян: {temp_data['seed_cost']:.2f}₽/г",
+                reply_markup=get_varieties_list(await db.get_all_varieties()),
+                parse_mode="Markdown"
+            )
+            await state.clear()
+            return
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при сохранении: {str(e)}")
+            return
+    
+    # Иначе - полное создание/редактирование шаблона
+    await state.update_data(temp_data=temp_data)
     await state.set_state(TemplateForm.base_cost)
     
     current_value = temp_data.get('base_cost', 0)
@@ -247,8 +337,31 @@ async def template_base_cost_handler(message: Message, state: FSMContext):
     data = await state.get_data()
     temp_data = data.get('temp_data', {})
     temp_data['base_cost'] = value
-    await state.update_data(temp_data=temp_data)
     
+    editing_id = data.get('editing_id')
+    
+    # Если это редактирование отдельного параметра - сразу сохраняем
+    if editing_id and len(temp_data) <= 2:  # Только base_cost и возможно другие параметры
+        try:
+            await retry_on_network_error()(db.update_variety)(
+                editing_id,
+                base_cost=temp_data['base_cost']
+            )
+            
+            await message.answer(
+                f"✅ *Параметр обновлён!*\n\n"
+                f"Базовая стоимость: {temp_data['base_cost']:.2f}₽",
+                reply_markup=get_varieties_list(await db.get_all_varieties()),
+                parse_mode="Markdown"
+            )
+            await state.clear()
+            return
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при сохранении: {str(e)}")
+            return
+    
+    # Иначе - полное создание/редактирование шаблона
+    await state.update_data(temp_data=temp_data)
     await state.set_state(TemplateForm.default_price)
     
     current_value = temp_data.get('default_price', 0)
@@ -275,8 +388,31 @@ async def template_default_price_handler(message: Message, state: FSMContext):
     data = await state.get_data()
     temp_data = data.get('temp_data', {})
     temp_data['default_price'] = value
-    await state.update_data(temp_data=temp_data)
     
+    editing_id = data.get('editing_id')
+    
+    # Если это редактирование отдельного параметра - сразу сохраняем
+    if editing_id and len(temp_data) <= 2:  # Только default_price и возможно другие параметры
+        try:
+            await retry_on_network_error()(db.update_variety)(
+                editing_id,
+                default_sale_price=temp_data['default_price']
+            )
+            
+            await message.answer(
+                f"✅ *Параметр обновлён!*\n\n"
+                f"Цена продажи: {temp_data['default_price']:.2f}₽",
+                reply_markup=get_varieties_list(await db.get_all_varieties()),
+                parse_mode="Markdown"
+            )
+            await state.clear()
+            return
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при сохранении: {str(e)}")
+            return
+    
+    # Иначе - полное создание/редактирование шаблона
+    await state.update_data(temp_data=temp_data)
     await state.set_state(TemplateForm.soak_hours)
     
     current_value = temp_data.get('soak_hours', 0)
@@ -303,8 +439,31 @@ async def template_soak_hours_handler(message: Message, state: FSMContext):
     data = await state.get_data()
     temp_data = data.get('temp_data', {})
     temp_data['soak_hours'] = int(value)
-    await state.update_data(temp_data=temp_data)
     
+    editing_id = data.get('editing_id')
+    
+    # Если это редактирование отдельного параметра - сразу сохраняем
+    if editing_id and len(temp_data) <= 2:  # Только soak_hours и возможно другие параметры
+        try:
+            await retry_on_network_error()(db.update_variety)(
+                editing_id,
+                soak_hours=temp_data['soak_hours']
+            )
+            
+            await message.answer(
+                f"✅ *Параметр обновлён!*\n\n"
+                f"Часы замачивания: {temp_data['soak_hours']}ч",
+                reply_markup=get_varieties_list(await db.get_all_varieties()),
+                parse_mode="Markdown"
+            )
+            await state.clear()
+            return
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при сохранении: {str(e)}")
+            return
+    
+    # Иначе - полное создание/редактирование шаблона
+    await state.update_data(temp_data=temp_data)
     await state.set_state(TemplateForm.dark_hours)
     
     current_value = temp_data.get('dark_hours', 0)
@@ -319,7 +478,12 @@ async def template_soak_hours_handler(message: Message, state: FSMContext):
 @router.message(TemplateForm.dark_hours)
 async def template_dark_hours_handler(message: Message, state: FSMContext):
     """Обработка часов в темноте"""
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"dark_hours_handler called with: {message.text}")
+    
     value = validate_number(message.text, 0, MAX_HOURS, is_int=True)
+    logger.info(f"validated value: {value}")
     
     if value is None:
         await message.answer(
@@ -331,8 +495,32 @@ async def template_dark_hours_handler(message: Message, state: FSMContext):
     data = await state.get_data()
     temp_data = data.get('temp_data', {})
     temp_data['dark_hours'] = int(value)
-    await state.update_data(temp_data=temp_data)
+    logger.info(f"saved dark_hours: {temp_data['dark_hours']}")
     
+    editing_id = data.get('editing_id')
+    
+    # Если это редактирование отдельного параметра - сразу сохраняем
+    if editing_id and len(temp_data) <= 2:  # Только dark_hours и возможно другие параметры
+        try:
+            await retry_on_network_error()(db.update_variety)(
+                editing_id,
+                dark_hours=temp_data['dark_hours']
+            )
+            
+            await message.answer(
+                f"✅ *Параметр обновлён!*\n\n"
+                f"Часы в темноте: {temp_data['dark_hours']}ч",
+                reply_markup=get_varieties_list(await db.get_all_varieties()),
+                parse_mode="Markdown"
+            )
+            await state.clear()
+            return
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при сохранении: {str(e)}")
+            return
+    
+    # Иначе - полное создание/редактирование шаблона
+    await state.update_data(temp_data=temp_data)
     await state.set_state(TemplateForm.light_hours)
     
     current_value = temp_data.get('light_hours', 0)
@@ -352,7 +540,7 @@ async def template_dark_hours_handler(message: Message, state: FSMContext):
 
 @router.message(TemplateForm.light_hours)
 async def template_light_hours_handler(message: Message, state: FSMContext):
-    """Обработка часов на свету и сохранение шаблона"""
+    """Обработка часов на свету"""
     value = validate_number(message.text, 0, MAX_HOURS, is_int=True)
     
     if value is None:
@@ -368,24 +556,53 @@ async def template_light_hours_handler(message: Message, state: FSMContext):
     
     editing_id = data.get('editing_id')
     
-    # Расчёт итоговых показателей
+    # Если это редактирование отдельного параметра - сразу сохраняем
+    if editing_id and len(temp_data) <= 2:  # Только light_hours и возможно другие параметры
+        try:
+            await retry_on_network_error()(db.update_variety)(
+                editing_id,
+                light_hours=temp_data['light_hours']
+            )
+            
+            await message.answer(
+                f"✅ *Параметр обновлён!*\n\n"
+                f"Время на свету: {temp_data['light_hours']}ч",
+                reply_markup=get_varieties_list(await db.get_all_varieties()),
+                parse_mode="Markdown"
+            )
+            await state.clear()
+            return
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при сохранении: {str(e)}")
+            return
+    
+    # Иначе - полное создание/редактирование шаблона
     lot_cost = (temp_data['seeds_per_lot'] * temp_data['seed_cost'] + temp_data['base_cost'])
     total_hours = temp_data['soak_hours'] + temp_data['dark_hours'] + temp_data['light_hours']
     
     try:
         if editing_id:
             # Обновление существующего шаблона с retry
-            await retry_on_network_error()(db.update_variety)(
-                editing_id,
-                name=temp_data['name'],
-                seeds_per_lot=temp_data['seeds_per_lot'],
-                seed_cost_per_gram=temp_data['seed_cost'],
-                base_cost=temp_data['base_cost'],
-                default_sale_price=temp_data['default_price'],
-                soak_hours=temp_data['soak_hours'],
-                dark_hours=temp_data['dark_hours'],
-                light_hours=temp_data['light_hours']
-            )
+            # Собираем только те параметры, которые есть в temp_data
+            update_params = {}
+            if 'name' in temp_data:
+                update_params['name'] = temp_data['name']
+            if 'seeds_per_lot' in temp_data:
+                update_params['seeds_per_lot'] = temp_data['seeds_per_lot']
+            if 'seed_cost' in temp_data:
+                update_params['seed_cost_per_gram'] = temp_data['seed_cost']
+            if 'base_cost' in temp_data:
+                update_params['base_cost'] = temp_data['base_cost']
+            if 'default_price' in temp_data:
+                update_params['default_sale_price'] = temp_data['default_price']
+            if 'soak_hours' in temp_data:
+                update_params['soak_hours'] = temp_data['soak_hours']
+            if 'dark_hours' in temp_data:
+                update_params['dark_hours'] = temp_data['dark_hours']
+            if 'light_hours' in temp_data:
+                update_params['light_hours'] = temp_data['light_hours']
+            
+            await retry_on_network_error()(db.update_variety)(editing_id, **update_params)
             action = "обновлён"
         else:
             # Создание нового шаблона с retry
@@ -417,7 +634,7 @@ async def template_light_hours_handler(message: Message, state: FSMContext):
         varieties = await db.get_all_varieties()
         await message.answer(
             "📦 *Шаблоны культур*\n\nВыберите шаблон для управления:",
-            reply_markup=templates_menu(varieties),
+            reply_markup=get_varieties_list(varieties),
             parse_mode="Markdown"
         )
         
@@ -448,7 +665,7 @@ async def template_delete_handler(callback: CallbackQuery):
         f"🗑️ *Удаление шаблона*\n\n"
         f"Вы уверены, что хотите удалить '{variety['name']}'?\n"
         f"Если есть активные партии, шаблон будет помечен как неактивный.",
-        reply_markup=template_delete_confirm(variety_id),
+        reply_markup=get_template_delete_confirm(variety_id),
         parse_mode="Markdown"
     )
     await callback.answer()
@@ -498,8 +715,217 @@ async def template_cancel_handler(callback: CallbackQuery, state: FSMContext):
     else:
         await callback.message.edit_text(
             "📦 *Шаблоны культур*\n\nВыберите шаблон для управления:",
-            reply_markup=templates_menu(varieties),
+            reply_markup=get_varieties_list(varieties),
             parse_mode="Markdown"
         )
     
+    await callback.answer()
+
+
+# Обработчики для редактирования отдельных параметров
+@router.callback_query(F.data.startswith("edit_param_name_"))
+async def edit_param_name_handler(callback: CallbackQuery, state: FSMContext):
+    """Начало редактирования названия"""
+    variety_id = int(callback.data.split("_")[-1])
+    variety = await db.get_variety(variety_id)
+    
+    if not variety:
+        await callback.answer("Шаблон не найден", show_alert=True)
+        return
+    
+    await state.set_state(TemplateForm.name)
+    await state.update_data(
+        editing_id=variety_id,
+        temp_data={'name': variety['name']}
+    )
+    
+    await callback.message.edit_text(
+        f"✏️ *Редактирование названия*\n\n"
+        f"Текущее название: {variety['name']}\n\n"
+        f"Введите новое название:",
+        reply_markup=back_keyboard(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edit_param_seeds_"))
+async def edit_param_seeds_handler(callback: CallbackQuery, state: FSMContext):
+    """Начало редактирования семян на лоток"""
+    variety_id = int(callback.data.split("_")[-1])
+    variety = await db.get_variety(variety_id)
+    
+    if not variety:
+        await callback.answer("Шаблон не найден", show_alert=True)
+        return
+    
+    await state.set_state(TemplateForm.seeds_per_lot)
+    await state.update_data(
+        editing_id=variety_id,
+        temp_data={'seeds_per_lot': variety['seeds_per_lot']}
+    )
+    
+    await callback.message.edit_text(
+        f"✏️ *Редактирование семян на лоток*\n\n"
+        f"Текущее значение: {variety['seeds_per_lot']}г\n\n"
+        f"Введите новое значение ({MIN_SEEDS_PER_LOT}-{MAX_SEEDS_PER_LOT}г):",
+        reply_markup=back_keyboard(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edit_param_seed_cost_"))
+async def edit_param_seed_cost_handler(callback: CallbackQuery, state: FSMContext):
+    """Начало редактирования цены семян"""
+    variety_id = int(callback.data.split("_")[-1])
+    variety = await db.get_variety(variety_id)
+    
+    if not variety:
+        await callback.answer("Шаблон не найден", show_alert=True)
+        return
+    
+    await state.set_state(TemplateForm.seed_cost)
+    await state.update_data(
+        editing_id=variety_id,
+        temp_data={'seed_cost': variety['seed_cost_per_gram']}
+    )
+    
+    await callback.message.edit_text(
+        f"✏️ *Редактирование цены семян*\n\n"
+        f"Текущее значение: {variety['seed_cost_per_gram']}₽/г\n\n"
+        f"Введите новую цену ({MIN_PRICE}-{MAX_PRICE}₽/г):",
+        reply_markup=back_keyboard(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edit_param_base_cost_"))
+async def edit_param_base_cost_handler(callback: CallbackQuery, state: FSMContext):
+    """Начало редактирования базовой стоимости"""
+    variety_id = int(callback.data.split("_")[-1])
+    variety = await db.get_variety(variety_id)
+    
+    if not variety:
+        await callback.answer("Шаблон не найден", show_alert=True)
+        return
+    
+    await state.set_state(TemplateForm.base_cost)
+    await state.update_data(
+        editing_id=variety_id,
+        temp_data={'base_cost': variety['base_cost']}
+    )
+    
+    await callback.message.edit_text(
+        f"✏️ *Редактирование базовой стоимости*\n\n"
+        f"Текущее значение: {variety['base_cost']}₽\n\n"
+        f"Введите новую стоимость ({MIN_PRICE}-{MAX_PRICE}₽):",
+        reply_markup=back_keyboard(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edit_param_price_"))
+async def edit_param_price_handler(callback: CallbackQuery, state: FSMContext):
+    """Начало редактирования цены продажи"""
+    variety_id = int(callback.data.split("_")[-1])
+    variety = await db.get_variety(variety_id)
+    
+    if not variety:
+        await callback.answer("Шаблон не найден", show_alert=True)
+        return
+    
+    await state.set_state(TemplateForm.default_price)
+    await state.update_data(
+        editing_id=variety_id,
+        temp_data={'default_price': variety['default_sale_price']}
+    )
+    
+    await callback.message.edit_text(
+        f"✏️ *Редактирование цены продажи*\n\n"
+        f"Текущее значение: {variety['default_sale_price']}₽\n\n"
+        f"Введите новую цену ({MIN_PRICE}-{MAX_PRICE}₽):",
+        reply_markup=back_keyboard(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edit_param_soak_"))
+async def edit_param_soak_handler(callback: CallbackQuery, state: FSMContext):
+    """Начало редактирования времени замачивания"""
+    variety_id = int(callback.data.split("_")[-1])
+    variety = await db.get_variety(variety_id)
+    
+    if not variety:
+        await callback.answer("Шаблон не найден", show_alert=True)
+        return
+    
+    await state.set_state(TemplateForm.soak_hours)
+    await state.update_data(
+        editing_id=variety_id,
+        temp_data={'soak_hours': variety['soak_hours']}
+    )
+    
+    await callback.message.edit_text(
+        f"✏️ *Редактирование времени замачивания*\n\n"
+        f"Текущее значение: {variety['soak_hours']}ч\n\n"
+        f"Введите новое время (0-{MAX_HOURS} часов):",
+        reply_markup=back_keyboard(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edit_param_dark_"))
+async def edit_param_dark_handler(callback: CallbackQuery, state: FSMContext):
+    """Начало редактирования времени в темноте"""
+    variety_id = int(callback.data.split("_")[-1])
+    variety = await db.get_variety(variety_id)
+    
+    if not variety:
+        await callback.answer("Шаблон не найден", show_alert=True)
+        return
+    
+    await state.set_state(TemplateForm.dark_hours)
+    await state.update_data(
+        editing_id=variety_id,
+        temp_data={'dark_hours': variety['dark_hours']}
+    )
+    
+    await callback.message.edit_text(
+        f"✏️ *Редактирование времени в темноте*\n\n"
+        f"Текущее значение: {variety['dark_hours']}ч\n\n"
+        f"Введите новое время (0-{MAX_HOURS} часов):",
+        reply_markup=back_keyboard(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edit_param_light_"))
+async def edit_param_light_handler(callback: CallbackQuery, state: FSMContext):
+    """Начало редактирования времени на свету"""
+    variety_id = int(callback.data.split("_")[-1])
+    variety = await db.get_variety(variety_id)
+    
+    if not variety:
+        await callback.answer("Шаблон не найден", show_alert=True)
+        return
+    
+    await state.set_state(TemplateForm.light_hours)
+    await state.update_data(
+        editing_id=variety_id,
+        temp_data={'light_hours': variety['light_hours']}
+    )
+    
+    await callback.message.edit_text(
+        f"✏️ *Редактирование времени на свету*\n\n"
+        f"Текущее значение: {variety['light_hours']}ч\n\n"
+        f"Введите новое время (0-{MAX_HOURS} часов):",
+        reply_markup=back_keyboard(),
+        parse_mode="Markdown"
+    )
     await callback.answer()

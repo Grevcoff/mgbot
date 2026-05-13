@@ -1,17 +1,23 @@
 import asyncio
 import logging
 import sys
+import os
+from dotenv import load_dotenv
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+
+# Загрузка переменных окружения
+load_dotenv()
 
 from database import Database
 from utils.scheduler import NotificationScheduler, handle_stage_callback
 from config import BOT_TOKEN, ADMIN_ID, LOG_LEVEL, LOG_FILE
 
 # Импорт хендлеров
-from handlers import start, templates, batches, sell
+from handlers import start, templates, batches, sell, admin
 
 # Настройка логирования
 logging.basicConfig(
@@ -62,35 +68,21 @@ async def main():
     handlers.templates.db = db
     handlers.batches.db = db
     handlers.sell.db = db
+    handlers.admin.db = db
     
     # Регистрация хендлеров
     dp.include_router(start.router)
     dp.include_router(templates.router)
     dp.include_router(batches.router)
     dp.include_router(sell.router)
+    dp.include_router(admin.router)
     
     # Регистрация обработчиков для callback'ов от уведомлений
     @dp.callback_query(lambda c: c.data.startswith("stage_"))
     async def stage_notification_handler(callback: types.CallbackQuery):
         await handle_stage_callback(callback, db, bot)
     
-    # Команда для админа /reset_db
-    @dp.message(lambda m: m.text == "/reset_db" and m.from_user.id == ADMIN_ID)
-    async def reset_db_command(message: types.Message):
-        try:
-            await db.reset_db()
-            await message.answer(
-                "✅ База данных успешно сброшена",
-                parse_mode="Markdown"
-            )
-            logger.info(f"Database reset by admin {ADMIN_ID}")
-        except Exception as e:
-            await message.answer(
-                f"❌ Ошибка при сбросе БД: {str(e)}",
-                parse_mode="Markdown"
-            )
-            logger.error(f"Error resetting database: {e}")
-    
+        
     # Обработка ошибок
     @dp.error()
     async def error_handler(event: types.ErrorEvent):

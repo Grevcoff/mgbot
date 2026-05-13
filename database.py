@@ -75,8 +75,26 @@ class Database:
                     )
                 ''')
                 
+                # Создание индексов для ускорения запросов
+                await db.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_batches_stage_notified ON batches(current_stage, notified)
+                ''')
+                
+                await db.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_lots_batch_status ON lots(batch_id, status)
+                ''')
+                
+                await db.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at)
+                ''')
+                
+                await db.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_varieties_name_active ON varieties(name, is_active)
+                ''')
+                
                 await db.commit()
                 logger.info("Database initialized successfully")
+                logger.debug("Created DB indexes")
     
     async def reset_db(self):
         """Drop and recreate all tables"""
@@ -128,6 +146,11 @@ class Database:
     async def update_variety(self, variety_id: int, **kwargs) -> bool:
         if not kwargs:
             return False
+        
+        # Логирование для отладки
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"update_variety called with kwargs: {kwargs}")
         
         set_clause = ', '.join([f"{k} = ?" for k in kwargs.keys()])
         values = list(kwargs.values()) + [variety_id]
@@ -188,14 +211,11 @@ class Database:
                            variety['base_cost'])
                 
                 year = datetime.now().year
-                async with db.execute('''
-                    SELECT COUNT(*) FROM lots WHERE lot_code LIKE ?
-                ''', (f'MG-{year}-%',)) as cursor:
-                    lot_count = (await cursor.fetchone())[0]
                 
+                # Нумерация лотов внутри каждой партии с 01
                 for i in range(quantity):
-                    lot_number = lot_count + i + 1
-                    lot_code = f'MG-{year}-{lot_number:03d}'
+                    lot_number = i + 1  # Начинаем с 1 для каждой партии
+                    lot_code = f'MG-{year}-{batch_id:02d}-{lot_number:02d}'
                     await db.execute('''
                         INSERT INTO lots (batch_id, lot_code, snapshot_cost)
                         VALUES (?, ?, ?)
@@ -207,7 +227,7 @@ class Database:
     async def get_batch(self, batch_id: int) -> Optional[Dict]:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute('''
-                SELECT b.*, v.name as variety_name, v.soak_hours, v.dark_hours, v.light_hours
+                SELECT b.*, v.name as variety_name, v.soak_hours, v.dark_hours, v.light_hours, v.default_sale_price
                 FROM batches b
                 JOIN varieties v ON b.variety_id = v.id
                 WHERE b.id = ?
@@ -219,13 +239,18 @@ class Database:
                 return None
     
     async def get_ready_batches(self) -> List[Dict]:
-        """Get batches that are ready for sale (current_stage = 'ready')"""
+        """Get batches that are ready for sale (current_stage = 'ready') AND have available lots"""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute('''
-                SELECT b.*, v.name as variety_name
+                SELECT b.*, v.name as variety_name,
+                       (SELECT COUNT(*) FROM lots WHERE batch_id = b.id AND status = 'growing') as available_lots
                 FROM batches b
                 JOIN varieties v ON b.variety_id = v.id
                 WHERE b.current_stage = 'ready'
+                AND b.id IN (
+                    SELECT DISTINCT batch_id FROM lots 
+                    WHERE status = 'growing' AND batch_id = b.id
+                )
                 ORDER BY b.stage_started_at
             ''') as cursor:
                 rows = await cursor.fetchall()
@@ -233,11 +258,39 @@ class Database:
                 return [dict(zip(columns, row)) for row in rows]
     
     async def get_all_batches(self) -> List[Dict]:
+        """Get only batches with available lots (not sold or written off)"""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute('''
-                SELECT b.*, v.name as variety_name
+                SELECT b.*, v.name as variety_name,
+                       (SELECT COUNT(*) FROM lots WHERE batch_id = b.id) as total_lots,
+                       (SELECT COUNT(*) FROM lots WHERE batch_id = b.id AND status = 'sold') as sold_lots,
+                       (SELECT COUNT(*) FROM lots WHERE batch_id = b.id AND status = 'written_off') as written_off_lots
                 FROM batches b
                 JOIN varieties v ON b.variety_id = v.id
+                WHERE b.id IN (
+                    SELECT DISTINCT batch_id FROM lots 
+                    WHERE status NOT IN ('sold', 'written_off')
+                )
+                ORDER BY b.stage_started_at DESC
+            ''') as cursor:
+                rows = await cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+    
+    async def get_archived_batches(self) -> List[Dict]:
+        """Get batches with no available lots (all sold or written off)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('''
+                SELECT b.*, v.name as variety_name,
+                       (SELECT COUNT(*) FROM lots WHERE batch_id = b.id) as total_lots,
+                       (SELECT COUNT(*) FROM lots WHERE batch_id = b.id AND status = 'sold') as sold_lots,
+                       (SELECT COUNT(*) FROM lots WHERE batch_id = b.id AND status = 'written_off') as written_off_lots
+                FROM batches b
+                JOIN varieties v ON b.variety_id = v.id
+                WHERE b.id NOT IN (
+                    SELECT DISTINCT batch_id FROM lots 
+                    WHERE status NOT IN ('sold', 'written_off')
+                )
                 ORDER BY b.stage_started_at DESC
             ''') as cursor:
                 rows = await cursor.fetchall()
@@ -306,6 +359,35 @@ class Database:
                 WHERE batch_id = ? AND status = 'growing'
                 ORDER BY lot_code
             ''', (batch_id,)) as cursor:
+                rows = await cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+    
+    async def get_lot_by_id(self, lot_id: int) -> Optional[Dict]:
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('''
+                SELECT l.*, b.variety_id, v.name as variety_name
+                FROM lots l
+                JOIN batches b ON l.batch_id = b.id
+                JOIN varieties v ON b.variety_id = v.id
+                WHERE l.id = ?
+            ''', (lot_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    columns = [desc[0] for desc in cursor.description]
+                    return dict(zip(columns, row))
+                return None
+    
+    async def get_all_lots(self) -> List[Dict]:
+        """Get all lots with variety information"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('''
+                SELECT l.*, b.variety_id, v.name as variety_name
+                FROM lots l
+                JOIN batches b ON l.batch_id = b.id
+                JOIN varieties v ON b.variety_id = v.id
+                ORDER BY l.id
+            ''') as cursor:
                 rows = await cursor.fetchall()
                 columns = [desc[0] for desc in cursor.description]
                 return [dict(zip(columns, row)) for row in rows]
@@ -408,6 +490,51 @@ class Database:
                 columns = [desc[0] for desc in cursor.description]
                 return [dict(zip(columns, row)) for row in rows]
     
+    async def write_off_batch(self, batch_id: int) -> bool:
+        """Write off all unsold lots in a batch (mark as written_off)"""
+        async with self.lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                try:
+                    # Update all unsold lots to written_off status
+                    await db.execute('''
+                        UPDATE lots 
+                        SET status = 'written_off' 
+                        WHERE batch_id = ? AND status = 'growing'
+                    ''', (batch_id,))
+                    
+                    # Check if all lots are now sold/written_off
+                    async with db.execute('''
+                        SELECT COUNT(*) FROM lots 
+                        WHERE batch_id = ? AND status = 'growing'
+                    ''', (batch_id,)) as cursor:
+                        growing_count = (await cursor.fetchone())[0]
+                    
+                    # If no growing lots left, batch will automatically appear in archive
+                    # No need to change stage - get_archived_batches handles this logic
+                    
+                    await db.commit()
+                    return True
+                except Exception as e:
+                    await db.rollback()
+                    raise e
+    
+    async def write_off_lot(self, lot_id: int) -> bool:
+        """Write off a single lot (mark as written_off)"""
+        async with self.lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                try:
+                    await db.execute('''
+                        UPDATE lots 
+                        SET status = 'written_off' 
+                        WHERE id = ? AND status = 'growing'
+                    ''', (lot_id,))
+                    
+                    await db.commit()
+                    return True
+                except Exception as e:
+                    await db.rollback()
+                    raise e
+    
     # Statistics
     async def get_statistics(self) -> Dict:
         async with aiosqlite.connect(self.db_path) as db:
@@ -426,9 +553,13 @@ class Database:
                 rows = await cursor.fetchall()
                 stats['batches_by_stage'] = {row[0]: row[1] for row in rows}
             
-            # Total lots and sold lots
+            # Total lots and sold lots (excluding ready batches from growing)
             async with db.execute('''
-                SELECT status, COUNT(*) FROM lots GROUP BY status
+                SELECT status, COUNT(*) FROM lots 
+                WHERE status != 'growing' OR batch_id NOT IN (
+                    SELECT id FROM batches WHERE current_stage = 'ready'
+                )
+                GROUP BY status
             ''') as cursor:
                 rows = await cursor.fetchall()
                 stats['lots_by_status'] = {row[0]: row[1] for row in rows}

@@ -5,7 +5,7 @@ from aiogram.types import Message, CallbackQuery
 
 from database import Database
 from states.sell import SellProcess
-from keyboards.sell import sell_batches_menu, sell_lots_selection, sell_cart_keyboard, sell_price_keyboard
+from keyboards.sell import get_ready_batches, get_lot_selection_buttons, get_cart_actions, get_price_keyboard
 from keyboards.main import main_menu
 from utils.helpers import format_price, validate_number
 from config import MAX_PRICE, MIN_PRICE
@@ -40,7 +40,7 @@ async def sell_start_handler(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "🛒 *Продажа лотков*\n\n"
         "Выберите партию для продажи:",
-        reply_markup=sell_batches_menu(ready_batches),
+        reply_markup=get_ready_batches(ready_batches),
         parse_mode="Markdown"
     )
     await callback.answer()
@@ -66,7 +66,7 @@ async def sell_batch_handler(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "🛒 *Выбор лотков*\n\n"
         "Выберите лотки для продажи (нажмите на номера):",
-        reply_markup=sell_lots_selection(available_lots, []),
+        reply_markup=get_lot_selection_buttons(available_lots, []),
         parse_mode="Markdown"
     )
     await callback.answer()
@@ -90,7 +90,7 @@ async def sell_lot_handler(callback: CallbackQuery, state: FSMContext):
     # Обновляем клавиатуру
     available_lots = await db.get_available_lots(current_batch_id)
     await callback.message.edit_reply_markup(
-        reply_markup=sell_lots_selection(available_lots, selected_lots)
+        reply_markup=get_lot_selection_buttons(available_lots, selected_lots)
     )
     await callback.answer()
 
@@ -112,7 +112,7 @@ async def sell_add_to_cart_handler(callback: CallbackQuery, state: FSMContext):
         f"🛒 *Цена продажи*\n\n"
         f"Выбрано лотков: {len(selected_lots)}\n\n"
         f"Установите цену для выбранных лотков:",
-        reply_markup=sell_price_keyboard(),
+        reply_markup=get_price_keyboard(),
         parse_mode="Markdown"
     )
     await callback.answer()
@@ -187,7 +187,7 @@ async def custom_price_handler(message: Message, state: FSMContext):
     # Показываем корзину
     await show_cart(message, state, db)
 
-async def show_cart(message: types.Message | CallbackQuery, state: FSMContext):
+async def show_cart(message: types.Message | CallbackQuery, state: FSMContext, db: Database):
     """Показ корзины"""
     data = await state.get_data()
     cart = data.get('cart', [])
@@ -204,10 +204,16 @@ async def show_cart(message: types.Message | CallbackQuery, state: FSMContext):
         total_amount = 0.0
         
         for lot_id in cart:
-            lot = await db.get_lot_by_code("")  # Получаем по ID
-            # Здесь нужно будет реализовать получение лота по ID
-            # Для упрощения используем временные данные
-            total_amount += data.get('temp_price', 0.0)
+            lot = await db.get_lot_by_id(lot_id)  # Получаем по ID
+            if lot:
+                sale_price = lot.get('sale_price')
+                if sale_price is not None:
+                    total_amount += float(sale_price)
+                else:
+                    total_amount += data.get('temp_price', 0.0)
+            else:
+                # Если лот не найден, используем стандартную цену
+                total_amount += data.get('temp_price', 0.0)
         
         text = (
             f"🛒 *Корзина*\n\n"
@@ -215,7 +221,7 @@ async def show_cart(message: types.Message | CallbackQuery, state: FSMContext):
             f"💰 Общая сумма: {format_price(total_amount)}"
         )
         
-        keyboard = sell_cart_keyboard(cart_items, total_amount)
+        keyboard = get_cart_actions()
     
     if isinstance(message, CallbackQuery):
         await message.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
@@ -232,7 +238,7 @@ async def sell_add_more_handler(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "🛒 *Добавление лотков*\n\n"
         "Выберите партию:",
-        reply_markup=sell_batches_menu(ready_batches),
+        reply_markup=get_ready_batches(ready_batches),
         parse_mode="Markdown"
     )
     await callback.answer()
@@ -310,7 +316,9 @@ async def sell_buyer_handler(message: Message, state: FSMContext):
             f"📦 *Лотков:* {len(cart)}\n"
             f"💰 *Сумма:* {format_price(order['total_amount'])}\n\n"
             f"Лотки отмечены как проданные.",
-            reply_markup=main_menu(),
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+        ]),
             parse_mode="Markdown"
         )
         
@@ -336,7 +344,7 @@ async def sell_cancel_price_handler(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "🛒 *Выбор лотков*\n\n"
         "Выберите лотки для продажи (нажмите на номера):",
-        reply_markup=sell_lots_selection(available_lots, selected_lots),
+        reply_markup=get_lot_selection_buttons(available_lots, selected_lots),
         parse_mode="Markdown"
     )
     await callback.answer()

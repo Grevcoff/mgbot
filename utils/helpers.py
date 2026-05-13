@@ -54,17 +54,18 @@ def format_price(price: float) -> str:
     return f"{price:.2f}₽"
 
 def parse_lot_code(lot_code: str) -> Optional[tuple]:
-    """Парсинг кода лотка MG-YYYY-NNN"""
-    match = re.match(r'MG-(\d{4})-(\d{3})', lot_code.upper())
+    """Парсинг кода лотка MG-YYYY-BB-LL"""
+    match = re.match(r'MG-(\d{4})-(\d{2})-(\d{2})', lot_code.upper())
     if match:
         year = int(match.group(1))
-        number = int(match.group(2))
-        return year, number
+        batch_id = int(match.group(2))
+        lot_number = int(match.group(3))
+        return year, batch_id, lot_number
     return None
 
-def generate_lot_code(year: int, number: int) -> str:
-    """Генерация кода лотка"""
-    return f"MG-{year}-{number:03d}"
+def generate_lot_code(year: int, batch_id: int, lot_number: int) -> str:
+    """Генерация кода лотка с форматом MG-YYYY-BB-LL"""
+    return f"MG-{year}-{batch_id:02d}-{lot_number:02d}"
 
 def calculate_lot_cost(seeds_per_lot: float, seed_cost_per_gram: float, base_cost: float) -> float:
     """Расчёт себестоимости лотка"""
