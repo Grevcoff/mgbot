@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 from aiogram import Router, F, types
 from aiogram.types import FSInputFile, CallbackQuery
 from database import Database
-from config import ADMIN_ID
+from config import ADMIN_ID, RESET_CONFIRM_CODE
 
 router = Router()
 
@@ -94,8 +94,7 @@ async def admin_reset_db_handler(callback: CallbackQuery):
     await callback.message.edit_text(
         "⚠️ *Сброс базы данных*\n\n"
         "Это действие удалит все данные!\n\n"
-        "Для подтверждения введите код подтверждения:\n\n"
-        f"Код: `{RESET_CONFIRM_CODE}`",
+        "Для подтверждения введите код подтверждения:",
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back")]
         ]),
@@ -107,8 +106,6 @@ async def admin_reset_db_handler(callback: CallbackQuery):
 @router.message(F.text & F.from_user.id == ADMIN_ID)
 async def admin_reset_code_handler(message: types.Message):
     """Обработка кода подтверждения сброса БД"""
-    from config import RESET_CONFIRM_CODE
-    
     if message.text.strip() == RESET_CONFIRM_CODE:
         try:
             await db.reset_db()
